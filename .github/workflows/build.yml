@@ -40,12 +40,11 @@ jobs:
           fi
           rm -rf LumaVisuals
           mkdir -p LumaVisuals
-          unzip -q "${zips[0]}" -d LumaVisuals
+          python3 -m zipfile -e "${zips[0]}" LumaVisuals/
           # Flatten a single wrapping folder if the archive has one
           if [[ ! -f LumaVisuals/build.gradle ]]; then
             shopt -s dotglob nullglob
             entries=(LumaVisuals/*)
-            shopt -u dotglob
             if (( ${#entries[@]} == 1 )) && [[ -d "${entries[0]}" ]]; then
               mv "${entries[0]}"/* LumaVisuals/
               rmdir "${entries[0]}"
