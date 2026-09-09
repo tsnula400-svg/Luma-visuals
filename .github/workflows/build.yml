@@ -1,1 +1,104 @@
+name: Build Lume Visuals - Audited Sources
 
+on:
+  workflow_dispatch:
+  # Build checked-out sources on every push, not only selected paths.
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          clean: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.12'
+
+      - name: Select checked-out project (never a ZIP)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+          # Locate selector only; it rejects multiple projects and stale root workflows.
+          if [[ -f "$GITHUB_WORKSPACE/tools/select_project.py" ]]; then
+            selector="$GITHUB_WORKSPACE/tools/select_project.py"
+          elif [[ -f "$GITHUB_WORKSPACE/LumaVisuals/tools/select_project.py" ]]; then
+            selector="$GITHUB_WORKSPACE/LumaVisuals/tools/select_project.py"
+          else
+            echo 'Extract audited sources into root or LumaVisuals/ and replace root build.yml.' >&2
+            exit 1
+          fi
+          project="$(python3 "$selector" "$GITHUB_WORKSPACE")"
+          echo "LUMA_PROJECT=$project" >> "$GITHUB_ENV"
+          echo "Commit: $GITHUB_SHA"
+          echo "Source: $project (checked-out files; all ZIPs ignored)"
+
+      - name: Source, interaction and build-guard regressions (not Minecraft)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$LUMA_PROJECT"
+          python3 tools/test_build_guards.py
+          python3 tools/test_javap_normalization.py
+          bash tools/check_core.sh "$RUNNER_TEMP/luma-core" 2>&1 | tee "$RUNNER_TEMP/luma-core.log"
+          python3 tools/custom_skin_v2/recording_check.py "$RUNNER_TEMP/luma-poses"
+
+      - name: Clean Fabric build and verify exact JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$LUMA_PROJECT"
+          # Explicitly discard even accidentally checked-in build outputs.
+          rm -rf build
+          gradle --no-daemon --no-build-cache --rerun-tasks clean build --stacktrace --console=plain 2>&1 | tee "$RUNNER_TEMP/luma-build.log"
+          version="$(sed -n 's/^mod_version=//p' gradle.properties | tr -d '\r')"
+          archive_name="$(sed -n 's/^archives_base_name=//p' gradle.properties | tr -d '\r')"
+          test -n "$version"
+          test -n "$archive_name"
+          jar="build/libs/${archive_name}-${version}.jar"
+          test -s "$jar"
+          artifact="$RUNNER_TEMP/luma-artifact"
+          rm -rf "$artifact"
+          mkdir -p "$artifact"
+          python3 tools/verify_jar.py --project . --jar "$jar" --commit "$GITHUB_SHA" --report "$artifact/JAR-VERIFICATION.json"
+          cp "$jar" "$artifact/"
+          cp build/resources/main/luma-build.json "$artifact/SOURCE-IDENTITY.json"
+          cp "$RUNNER_TEMP/luma-core.log" "$RUNNER_TEMP/luma-build.log" "$artifact/"
+          printf 'Minecraft + Zalith Launcher 2 + MobileGlues: NOT RUN\n' > "$artifact/IN-GAME-STATUS.txt"
+          (cd "$artifact" && sha256sum "${archive_name}-${version}.jar" > "JAR-SHA256SUMS.txt")
+          echo "### Verified build inputs and package (not in-game)" >> "$GITHUB_STEP_SUMMARY"
+          cat "$artifact/JAR-VERIFICATION.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumeVisuals-MC1.21.4-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/luma-artifact/*
+          if-no-files-found: error
+          overwrite: false
+
+      - name: Upload diagnostic logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LumeVisuals-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/luma-core.log
+            ${{ runner.temp }}/luma-build.log
+          if-no-files-found: ignore
+          
